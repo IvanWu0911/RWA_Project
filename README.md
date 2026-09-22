@@ -20,6 +20,7 @@
 ├── 412630567-RWA-DEMO-main/     # 前端 DEMO（React + Vite）
 │   ├── src/app/pages/           #   投資人 / 銀行端 / 技術端 三種角色介面
 │   └── crawler/                 #   Python 爬蟲：抓取台灣實價登錄資料
+├── docs/                        # 專題文件書（PDF / DOCX，95 頁）
 ├── slides/                      # 簡報產生腳本（pptxgenjs）
 └── export_code.js 等            # 程式碼匯出／整理工具
 ```
@@ -43,6 +44,13 @@
 - **租金分潤**：依 `payout_cycle_days` 週期分配，含重複發放鎖定與合規週期警示
 - **鏈上／鏈下對帳**：`reconcile()` 以 `queryFilter` 全量重建，偵測未追蹤轉帳與 reorg
 - **故障注入測試**：服務重啟、重複事件、Nonce 衝突、區塊重組、通知失敗五情境（見 `test-logs/`）
+
+## 專題文件
+
+完整的系統文件書（摘要、系統設計、ER 模型、循序圖、API 授權矩陣、負載測試、SWOT 分析等，共 95 頁）：
+
+- 📄 [房產鏈金術 RWA房產代幣化交易系統文件書.pdf](docs/房產鏈金術%20RWA房產代幣化交易系統文件書.pdf) — 可直接在 GitHub 上預覽
+- 📝 [Word 原檔（.docx）](docs/房產鏈金術%20RWA房產代幣化交易系統文件書.docx)
 
 ## 快速開始
 
