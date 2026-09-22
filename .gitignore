@@ -42,10 +42,10 @@ coverage/
 /test-*.js
 /test[0-9]*.js
 /debug-*.js
-RWA_Project-main/rwa-backend/check-*.js
-RWA_Project-main/rwa-backend/test-*.js
-RWA_Project-main/rwa-backend/debug-*.js
-RWA_Project-main/rwa-backend/list-files.js
+rwa-backend/check-*.js
+rwa-backend/test-*.js
+rwa-backend/debug-*.js
+rwa-backend/list-files.js
 
 # Code Dumps & Review Docs (Prevent leaking secrets)
 all_code.txt
