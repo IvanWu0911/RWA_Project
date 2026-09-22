@@ -5,6 +5,8 @@
 
 **作者：[IvanWu0911](https://github.com/IvanWu0911)**
 
+![建案詳情：K 線、掛單簿與下單面板](docs/screenshots/investor-property-detail.png)
+
 ---
 
 ## 專案架構
@@ -20,7 +22,7 @@
 ├── 412630567-RWA-DEMO-main/     # 前端 DEMO（React + Vite）
 │   ├── src/app/pages/           #   投資人 / 銀行端 / 技術端 三種角色介面
 │   └── crawler/                 #   Python 爬蟲：抓取台灣實價登錄資料
-├── docs/                        # 專題文件書（PDF / DOCX，95 頁）
+├── docs/                        # 專題文件書（PDF / DOCX，95 頁）與系統截圖
 ├── slides/                      # 簡報產生腳本（pptxgenjs）
 └── export_code.js 等            # 程式碼匯出／整理工具
 ```
@@ -44,6 +46,26 @@
 - **租金分潤**：依 `payout_cycle_days` 週期分配，含重複發放鎖定與合規週期警示
 - **鏈上／鏈下對帳**：`reconcile()` 以 `queryFilter` 全量重建，偵測未追蹤轉帳與 reorg
 - **故障注入測試**：服務重啟、重複事件、Nonce 衝突、區塊重組、通知失敗五情境（見 `test-logs/`）
+
+## 系統畫面
+
+### 投資人端
+
+| 登入頁（三種示範角色） | 持倉總覽 |
+|---|---|
+| ![登入頁](docs/screenshots/login.png) | ![持倉總覽](docs/screenshots/investor-portfolio.png) |
+
+| 房產市場（縣市篩選、即時現價） | 交易紀錄（掛單 / 歷史 / CSV 稽核匯出） |
+|---|---|
+| ![房產市場](docs/screenshots/investor-market.png) | ![交易紀錄](docs/screenshots/investor-transactions.png) |
+
+### 業務端 — 租金監管與收益發放
+
+![業務端儀表板](docs/screenshots/banker-dashboard.png)
+
+### 技術端 — 系統監控與合約控制
+
+![技術端儀表板](docs/screenshots/technician-dashboard.png)
 
 ## 專題文件
 
