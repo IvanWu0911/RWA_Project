@@ -1,0 +1,69 @@
+import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, JoinColumn, CreateDateColumn } from 'typeorm';
+import { Role } from './role.entity';
+
+@Entity('users')
+export class User {
+  @PrimaryGeneratedColumn()
+  id: number;
+
+  @Column({ unique: true, nullable: true })
+  username: string;
+
+  @Column({ unique: true, nullable: true })
+  email: string;
+
+  @Column({ nullable: true })
+  phone_number: string;
+
+  @Column({ default: false })
+  is_email_verified: boolean;
+
+  @Column({ nullable: true })
+  password_hash: string;
+
+  @Column({ default: 1 })
+  role_id: number;
+
+  @Column({ default: false })
+  is_whitelisted: boolean;
+
+  @Column({ default: 'PENDING' })
+  kyc_status: string;
+
+  @Column({ nullable: true })
+  kyc_document_path: string;
+
+  @Column({ nullable: true })
+  kyc_document_back_path: string;
+
+  @Column({ nullable: true })
+  kyc_reviewed_by: number;
+
+  @Column({ nullable: true })
+  kyc_reviewed_at: Date;
+
+  @Column({ nullable: true })
+  onchain_id_address: string;
+
+  @Column({ type: 'numeric', nullable: true, default: 100000 })
+  total_asset_value: number; // 方案 A：承載個人可用現金餘額 (Cash Balance)
+
+  @Column({ type: 'numeric', nullable: true, default: 0 })
+  total_profit_loss: number;
+
+  @Column({ nullable: true })
+  wallet_address: string;
+
+  @Column({ nullable: true })
+  wallet_private_key: string;
+
+  @Column({ nullable: true })
+  bank_account_number: string;
+
+  @CreateDateColumn()
+  created_at: Date;
+
+  @ManyToOne(() => Role)
+  @JoinColumn({ name: 'role_id' })
+  role: Role;
+}

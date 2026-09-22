@@ -1,0 +1,168 @@
+import { Injectable, UnauthorizedException, ConflictException, BadRequestException, NotFoundException } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { ethers } from 'ethers';
+import * as bcrypt from 'bcryptjs';
+import * as crypto from 'crypto';
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import WebSocket from 'ws';
+import { User } from '../entities/user.entity';
+import { Role } from '../entities/role.entity';
+
+import { encryptBuffer, encryptString } from '../utils/crypto.util';
+import { validateAndSanitizeKycFile } from '../utils/file-validation.util';
+
+@Injectable()
+export class AuthService {
+  private supabase: SupabaseClient;
+
+  constructor(
+    @InjectRepository(User) private userRepo: Repository<User>,
+    @InjectRepository(Role) private roleRepo: Repository<Role>,
+    private jwtService: JwtService,
+  ) {
+    if (!process.env.SUPABASE_SERVICE_KEY) {
+      throw new Error('FATAL: SUPABASE_SERVICE_KEY is required but not set.');
+    }
+    this.supabase = createClient(
+      process.env.SUPABASE_URL || 'https://uowremtggfpoxxruiccw.supabase.co',
+      process.env.SUPABASE_SERVICE_KEY,
+      // Node 20 沒有原生 WebSocket，supabase-js 的 realtime client 會在建構時直接拋錯。
+      // 這裡只用 storage API（KYC 上傳），完全不需要 realtime，補一個 ws 實作讓它能正常初始化就好。
+      { realtime: { transport: WebSocket as any } },
+    );
+  }
+
+  async login(username: string, password: string) {
+    const user = await this.userRepo
+      .createQueryBuilder('u')
+      .addSelect('u.password_hash')
+      .innerJoinAndSelect('u.role', 'r')
+      .where('u.username = :username', { username })
+      .getOne();
+
+    if (!user) throw new UnauthorizedException('無效的帳號或密碼');
+
+    const isMatch = await bcrypt.compare(password, user.password_hash);
+    if (!isMatch) throw new UnauthorizedException('無效的帳號或密碼');
+
+    const roleName: string = (user.role as any)?.role_name || 'INVESTOR';
+    const payload = { id: user.id, username: user.username, role: roleName };
+    const token = this.jwtService.sign(payload);
+
+    return {
+      success: true,
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        role: roleName.toUpperCase().trim(),
+        kyc_status: user.kyc_status,
+        is_whitelisted: user.is_whitelisted,
+      },
+    };
+  }
+
+  async register(username: string, email: string, phone_number: string, password: string, fileFront?: Express.Multer.File, fileBack?: Express.Multer.File) {
+    const exists = await this.userRepo.findOne({
+      where: [{ username }, { email }],
+    });
+    if (exists) throw new ConflictException('帳號或 Email 已被使用');
+
+    const investorRole = await this.roleRepo.findOne({ where: { role_name: 'INVESTOR' } });
+    if (!investorRole) throw new NotFoundException('找不到 INVESTOR 角色');
+
+    const wallet = ethers.Wallet.createRandom();
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    let kyc_document_path: string | undefined = undefined;
+    let kyc_document_back_path: string | undefined = undefined;
+
+    const uploadEncrypted = async (fileToUpload: Express.Multer.File, suffix: 'front' | 'back') => {
+      // 1. 副檔名白名單 2. Magic Bytes 真實圖檔檢驗 3. 單檔大小限制 (5MB) 4. 伺服器重新產生安全檔名
+      const { sanitizedFileName, format } = validateAndSanitizeKycFile(fileToUpload, username, suffix);
+      const encryptedBuffer = encryptBuffer(fileToUpload.buffer);
+      
+      const { data, error } = await this.supabase.storage
+        .from('kyc-documents')
+        .upload(sanitizedFileName, encryptedBuffer, {
+          contentType: format === 'png' ? 'image/png' : 'image/jpeg',
+          upsert: true,
+        });
+      
+      if (error || !data?.path) {
+        throw new BadRequestException(
+          `KYC 證件（${suffix === 'front' ? '正面' : '反面'}）上傳失敗：${error?.message || '雲端儲存空間連線異常'}，請重試或聯繫技術人員。`,
+        );
+      }
+      return data.path;
+    };
+
+    if (fileFront) {
+      kyc_document_path = await uploadEncrypted(fileFront, 'front');
+    }
+    
+    if (fileBack) {
+      kyc_document_back_path = await uploadEncrypted(fileBack, 'back');
+    }
+
+    const hasFiles = !!(fileFront && fileBack);
+    const initialKycStatus = hasFiles ? 'PENDING' : 'UNSUBMITTED';
+
+    const user = await this.userRepo.save({
+      username,
+      email,
+      phone_number,
+      password_hash: passwordHash,
+      role_id: investorRole.id,
+      is_whitelisted: false,
+      is_email_verified: false,
+      kyc_status: initialKycStatus,
+      kyc_document_path,
+      kyc_document_back_path,
+      total_asset_value: 100000, // 初始給予 100,000 TWD 可用現金體驗金
+      total_profit_loss: 0,
+      wallet_address: wallet.address,
+      wallet_private_key: encryptString(wallet.privateKey),
+    });
+
+    return {
+      success: true,
+      userId: user.id,
+      username: user.username,
+      walletAddress: wallet.address,
+      kycStatus: initialKycStatus,
+      message: hasFiles ? '註冊成功，請等待 KYC 審核通過後即可交易' : '註冊成功！請登入並於系統內完成實名認證 (KYC)',
+    };
+  }
+
+  async changePassword(userId: number, oldPassword: string, newPassword: string) {
+    if (!oldPassword || !newPassword) {
+      throw new BadRequestException('請提供舊密碼與新密碼');
+    }
+
+    if (newPassword.length < 6) {
+      throw new BadRequestException('新密碼長度至少需 6 個字元');
+    }
+
+    const user = await this.userRepo.findOne({ where: { id: userId } });
+
+    if (!user || !user.password_hash) {
+      throw new NotFoundException('找不到此用戶或密碼資訊');
+    }
+
+    const isMatch = await bcrypt.compare(oldPassword, user.password_hash);
+    if (!isMatch) {
+      throw new BadRequestException('當前密碼輸入錯誤，請重新確認！');
+    }
+
+    const newPasswordHash = await bcrypt.hash(newPassword, 10);
+    await this.userRepo.update(userId, { password_hash: newPasswordHash });
+
+    return {
+      success: true,
+      message: '密碼已成功更新！',
+    };
+  }
+}

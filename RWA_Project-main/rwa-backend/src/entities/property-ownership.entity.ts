@@ -1,0 +1,25 @@
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn } from 'typeorm';
+
+@Entity('property_ownership')
+export class PropertyOwnership {
+  @PrimaryGeneratedColumn()
+  id: number;
+
+  @Column()
+  property_id: number;
+
+  @Column()
+  holder_name: string;
+
+  @Column({ type: 'numeric' })
+  ownership_percentage: number;
+
+  @Column({ nullable: true })
+  legal_document_ref: string;
+
+  @Column({ default: 'INDIVIDUAL' })
+  entity_type: string;
+
+  @CreateDateColumn()
+  created_at: Date;
+}

@@ -1,0 +1,341 @@
+/**
+ * 整合測試 (Integration Test) + 權限測試 (Authorization Test)
+ * -------------------------------------------------------------
+ * 這份測試會真的透過 HTTP（supertest）打進 Nest 應用程式，
+ * 完整跑過：JwtAuthGuard → Controller → Service 這條真實路徑。
+ * 只有最底層的資料庫（Repository / DataSource）用 mock 取代，
+ * 所以不需要真的連 Postgres / Supabase 就能跑，CI 也能直接執行。
+ *
+ * 放置位置（依專案結構）：
+ *   RWA_Project-main/rwa-backend/test/integration-auth.e2e-spec.ts
+ *
+ * 執行方式：
+ *   cd RWA_Project-main/rwa-backend
+ *   npx jest --config ./test/jest-e2e.json test/integration-auth.e2e-spec.ts
+ * -------------------------------------------------------------
+ */
+
+// JwtStrategy 在 module 載入當下就會讀 process.env.JWT_SECRET，
+// 所以一定要在 import 任何 Nest 模組「之前」先設好。
+process.env.JWT_SECRET = 'test-only-secret-do-not-use-in-prod';
+
+// UsersController 會 import UsersService，而 users.service.ts 在 module 最外層
+// （不是在 constructor 裡）就會檢查 IMAGE_ENCRYPTION_KEY 是否存在，沒有的話直接
+// throw，讓整個模組載入失敗 —— 這是我們刻意加上的 fail-fast 防護（見
+// fault-injection-env.spec.ts），效果很好，好到把這支 e2e 測試也一起擋下來了。
+// 所以這裡也要在 import 任何東西之前，先給一個假的測試用值。
+process.env.IMAGE_ENCRYPTION_KEY = 'test-only-32-byte-key-for-e2e-!!';
+
+import { Test, TestingModule } from '@nestjs/testing';
+import { INestApplication } from '@nestjs/common';
+import { PassportModule } from '@nestjs/passport';
+import { JwtModule, JwtService } from '@nestjs/jwt';
+import { getRepositoryToken } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
+// 注意：這裡刻意不用 `import * as request from 'supertest'` 或
+// `import request from 'supertest'`。supertest 用的是 CommonJS 的
+// `export =` 匯出方式（匯出的是一個「函式本身」，不是一個帶 default
+// 屬性的物件），在某些 esModuleInterop / module 編譯設定組合下，
+// `import * as request` 會被 TS 的 __importStar 輔助函式包裝成一個
+// 新的、不可呼叫的物件，導致執行期出現「request is not a function」。
+// `import X = require(...)` 這個語法不受 esModuleInterop 影響，
+// 會直接拿到 require() 的原始回傳值（也就是那個可呼叫的函式本身），
+// 是官方文件推薦、最不會因專案編譯設定不同而出錯的寫法。
+import request = require('supertest');
+
+import { TransactionsController } from '../src/transactions/transactions.controller';
+import { TransactionsService } from '../src/transactions/transactions.service';
+import { UsersController } from '../src/users/users.controller';
+import { UsersService } from '../src/users/users.service';
+import { JwtStrategy } from '../src/auth/jwt.strategy';
+import { SystemService } from '../src/system/system.service';
+import { BlockchainService } from '../src/blockchain/blockchain.service';
+import { UserNotification } from '../src/entities/notification.entity';
+import { User } from '../src/entities/user.entity';
+import { AppTransaction } from '../src/entities/app-transaction.entity';
+import { Property } from '../src/entities/property.entity';
+import { UserHolding } from '../src/entities/user-holdings.entity';
+
+describe('整合測試 + 權限測試 (e2e, mocked DB)', () => {
+  let app: INestApplication;
+  let jwtService: JwtService;
+
+  // ---- 共用 mock：模擬 DB 內容 ----
+  const MOCK_PROPERTY = {
+    id: 1,
+    title: '測試建案 A',
+    total_supply_x: 100000,
+    fundraising_goal: 18919000,
+    current_price: 189.19,
+    token_address: null,
+  };
+
+  const mockDataSource = {
+    // ⚠️ 補充說明：TransactionsService 裡有兩種用資料庫的方式：
+    //   1. runTrade() 用 this.dataSource.createQueryRunner() 開交易（下面那個 createQueryRunner）
+    //   2. getPendingOrders() / cancelPendingOrder() / getOrderBook() / getMarketStats()
+    //      直接用 this.dataSource.manager.xxx()，完全不透過 queryRunner
+    // 一開始我只 mock 了 createQueryRunner 裡面的 manager，忘記 DataSource
+    // 「最外層」也要有自己的 manager，才會涵蓋到第 2 種呼叫方式。
+    manager: {
+      find: jest.fn().mockResolvedValue([]), // getPendingOrders
+      findOne: jest.fn(async (entity: any) => {
+        if (entity === Property) return { ...MOCK_PROPERTY };
+        return null; // cancelPendingOrder 找不到單就回 null，測不到的話會丟 400，這裡先都當作找不到單
+      }),
+      save: jest.fn().mockResolvedValue({ id: 1 }), // cancelPendingOrder
+      createQueryBuilder: jest.fn(() => ({
+        // getOrderBook() / getMarketStats() 用到的完整鏈式方法
+        select: jest.fn().mockReturnThis(),
+        addSelect: jest.fn().mockReturnThis(),
+        where: jest.fn().mockReturnThis(),
+        andWhere: jest.fn().mockReturnThis(),
+        groupBy: jest.fn().mockReturnThis(),
+        orderBy: jest.fn().mockReturnThis(),
+        limit: jest.fn().mockReturnThis(),
+        getRawMany: jest.fn().mockResolvedValue([]), // getOrderBook 的 bids/asks
+        getRawOne: jest.fn().mockResolvedValue({ high: null, low: null, volume: '0' }), // getMarketStats
+      })),
+    },
+    createQueryRunner: () => ({
+      connect: jest.fn().mockResolvedValue(undefined),
+      startTransaction: jest.fn().mockResolvedValue(undefined),
+      commitTransaction: jest.fn().mockResolvedValue(undefined),
+      rollbackTransaction: jest.fn().mockResolvedValue(undefined),
+      release: jest.fn().mockResolvedValue(undefined),
+      manager: {
+        findOne: jest.fn(async (entity: any) => {
+          if (entity === Property) return { ...MOCK_PROPERTY };
+          if (entity === User) return { id: 1, is_whitelisted: true, total_asset_value: 999999999999 };
+          return null;
+        }),
+        createQueryBuilder: jest.fn(() => ({
+          select: jest.fn().mockReturnThis(),
+          update: jest.fn().mockReturnThis(),
+          where: jest.fn().mockReturnThis(),
+          andWhere: jest.fn().mockReturnThis(),
+          orderBy: jest.fn().mockReturnThis(),
+          addOrderBy: jest.fn().mockReturnThis(),
+          getMany: jest.fn().mockResolvedValue([]),
+          set: jest.fn().mockReturnThis(),
+          execute: jest.fn().mockResolvedValue(undefined),
+          getRawOne: jest.fn().mockResolvedValue({ total: '0' }),
+        })),
+        save: jest.fn().mockResolvedValue({ id: 1 }),
+        update: jest.fn().mockResolvedValue(undefined),
+      },
+    }),
+  };
+
+  const mockUsersService = {
+    findAll: jest.fn().mockResolvedValue([{ id: 1, username: 'demo' }]),
+    updateWhitelist: jest.fn().mockResolvedValue({ success: true }),
+    approveKyc: jest.fn().mockResolvedValue({ success: true }),
+    decryptKycImages: jest.fn().mockResolvedValue({ success: true }),
+  };
+
+  beforeAll(async () => {
+    const moduleRef: TestingModule = await Test.createTestingModule({
+      imports: [
+        PassportModule,
+        JwtModule.register({
+          secret: process.env.JWT_SECRET,
+          signOptions: { expiresIn: '1h' },
+        }),
+      ],
+      controllers: [TransactionsController, UsersController],
+      providers: [
+        TransactionsService,
+        JwtStrategy,
+        { provide: UsersService, useValue: mockUsersService },
+        { provide: getRepositoryToken(UserNotification), useValue: { save: jest.fn() } },
+        { provide: getRepositoryToken(User), useValue: { findOne: jest.fn().mockResolvedValue({ id: 1, is_whitelisted: true, wallet_address: null, total_asset_value: 999999999999 }) } },
+        { provide: getRepositoryToken(AppTransaction), useValue: {} },
+        { provide: getRepositoryToken(Property), useValue: {} },
+        { provide: getRepositoryToken(UserHolding), useValue: {} },
+        { provide: DataSource, useValue: mockDataSource },
+        { provide: SystemService, useValue: { getState: () => ({ isPaused: false }), isThrottled: () => false } },
+        { provide: BlockchainService, useValue: {} },
+      ],
+    }).compile();
+
+    app = moduleRef.createNestApplication();
+    jwtService = moduleRef.get(JwtService);
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  function tokenFor(user: { id: number; username: string; role: string }) {
+    return jwtService.sign(user);
+  }
+
+  // ================================================================
+  // 權限測試：JWT 驗證本身
+  // ================================================================
+  describe('權限測試 — JWT 驗證', () => {
+    it('未帶 Authorization header 打受保護的 API 應回 401', async () => {
+      await request(app.getHttpServer()).get('/api/pending-orders').expect(401);
+    });
+
+    it('帶壞掉/篡改過的 token 應回 401', async () => {
+      await request(app.getHttpServer())
+        .get('/api/pending-orders')
+        .set('Authorization', 'Bearer this.is.not.a.valid.jwt')
+        .expect(401);
+    });
+
+    it('帶合法 token 應該通過驗證（不是 401）', async () => {
+      const token = tokenFor({ id: 1, username: 'investor1', role: 'INVESTOR' });
+      const res = await request(app.getHttpServer())
+        .get('/api/pending-orders')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(res.status).not.toBe(401);
+    });
+  });
+
+  // ================================================================
+  // 權限測試：擁有者檢查（不能幫別人下單）
+  // ================================================================
+  describe('權限測試 — 資源擁有者檢查', () => {
+    it('user_id 跟 token 裡的 id 不一致時應回 403（不能幫別人下單）', async () => {
+      const token = tokenFor({ id: 1, username: 'investor1', role: 'INVESTOR' }); // 我是 1 號
+      const res = await request(app.getHttpServer())
+        .post('/api/transactions')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          user_id: 2, // 卻想用 2 號的身分下單
+          property_id: 1,
+          tx_type: 'BUY',
+          order_type: 'MARKET',
+          token_amount: 10,
+          price_per_token: 999999,
+        });
+
+      expect(res.status).toBe(403);
+    });
+
+    it('user_id 跟 token 一致時應正常進入下單流程（不是 403）', async () => {
+      const token = tokenFor({ id: 1, username: 'investor1', role: 'INVESTOR' });
+      const res = await request(app.getHttpServer())
+        .post('/api/transactions')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          user_id: 1,
+          property_id: 1,
+          tx_type: 'BUY',
+          order_type: 'MARKET',
+          token_amount: 10,
+          price_per_token: 999999,
+        });
+
+      expect(res.status).not.toBe(403);
+      expect(res.status).not.toBe(401);
+    });
+  });
+
+  // ================================================================
+  // 權限測試：管理員專屬 API（角色檢查）
+  // ================================================================
+  describe('權限測試 — BUSINESS 角色專屬 API', () => {
+    const adminOnlyEndpoints: Array<[string, string]> = [
+      ['get', '/api/users'],
+      ['patch', '/api/users/2/whitelist'],
+      ['patch', '/api/users/2/kyc'],
+      ['post', '/api/kyc/2/decrypt'],
+    ];
+
+    it.each(adminOnlyEndpoints)(
+      '一般投資人 (INVESTOR) 呼叫 %s %s 應回 403',
+      async (method, url) => {
+        const token = tokenFor({ id: 1, username: 'investor1', role: 'INVESTOR' });
+        const res = await (request(app.getHttpServer()) as any)[method](url)
+          .set('Authorization', `Bearer ${token}`)
+          .send({});
+
+        expect(res.status).toBe(403);
+      },
+    );
+
+    it.each(adminOnlyEndpoints)(
+      '管理員 (BUSINESS) 呼叫 %s %s 不應被擋在權限這關（不是 403）',
+      async (method, url) => {
+        const token = tokenFor({ id: 99, username: 'admin1', role: 'BUSINESS' });
+        const res = await (request(app.getHttpServer()) as any)[method](url)
+          .set('Authorization', `Bearer ${token}`)
+          .send({});
+
+        expect(res.status).not.toBe(403);
+      },
+    );
+  });
+
+  // ================================================================
+  // 整合測試：下單完整路徑（Controller → Guard → Service）
+  // ================================================================
+  describe('整合測試 — 下單完整路徑', () => {
+    it('合法下單應該回傳 success:true，並帶有交易結果', async () => {
+      const token = tokenFor({ id: 1, username: 'investor1', role: 'INVESTOR' });
+      const res = await request(app.getHttpServer())
+        .post('/api/transactions')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          user_id: 1,
+          property_id: 1,
+          tx_type: 'BUY',
+          order_type: 'MARKET',
+          token_amount: 10,
+          price_per_token: 999999,
+          idempotency_key: `itest-${Date.now()}`,
+        })
+        .expect(201);
+
+      expect(res.body).toEqual(expect.objectContaining({ success: true }));
+    });
+
+    it('系統暫停時，就算通過所有權限檢查，下單也應該在 Service 層被擋下', async () => {
+      // 這裡動態把 SystemService 換成「暫停中」的版本，驗證整條路徑真的有把
+      // Service 層的業務規則串起來，而不是只測 Controller 本身
+      const pausedModuleRef = await Test.createTestingModule({
+        imports: [
+          PassportModule,
+          JwtModule.register({ secret: process.env.JWT_SECRET, signOptions: { expiresIn: '1h' } }),
+        ],
+        controllers: [TransactionsController],
+        providers: [
+          TransactionsService,
+          JwtStrategy,
+          { provide: getRepositoryToken(UserNotification), useValue: { save: jest.fn() } },
+          { provide: getRepositoryToken(User), useValue: { findOne: jest.fn().mockResolvedValue({ id: 1, is_whitelisted: true, total_asset_value: 999999999999 }) } },
+          { provide: DataSource, useValue: mockDataSource },
+          { provide: SystemService, useValue: { getState: () => ({ isPaused: true }), isThrottled: () => false } },
+          { provide: BlockchainService, useValue: {} },
+        ],
+      }).compile();
+
+      const pausedApp = pausedModuleRef.createNestApplication();
+      await pausedApp.init();
+
+      const token = jwtService.sign({ id: 1, username: 'investor1', role: 'INVESTOR' });
+      const res = await request(pausedApp.getHttpServer())
+        .post('/api/transactions')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          user_id: 1,
+          property_id: 1,
+          tx_type: 'BUY',
+          order_type: 'MARKET',
+          token_amount: 10,
+          price_per_token: 999999,
+        });
+
+      expect(res.status).toBe(403);
+      expect(JSON.stringify(res.body)).toContain('系統已暫停交易');
+
+      await pausedApp.close();
+    });
+  });
+});
